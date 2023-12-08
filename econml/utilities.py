@@ -519,6 +519,8 @@ def check_inputs(Y, T, X, W=None, multi_output_T=True, multi_output_Y=True,
         Converted and validated W.
 
     """
+    force_all_finite_X = False
+    force_all_finite_W = False
     X, T = check_X_y(X, T, multi_output=multi_output_T, y_numeric=True, force_all_finite=force_all_finite_X)
     if force_all_finite_X == 'allow-nan':
         try:
@@ -571,6 +573,7 @@ def check_input_arrays(*args, validate_len=True, force_all_finite=True, dtype=No
 
     """
     n = None
+    force_all_finite = False
     args = list(args)
     for i, arg in enumerate(args):
         if np.ndim(arg) > 0:
