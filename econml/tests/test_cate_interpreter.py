@@ -13,6 +13,8 @@ try:
     from graphviz import Graph
     g = Graph()
     g.render()
+    import matplotlib
+    matplotlib.use('Agg')
 except Exception:
     graphviz_works = False
 

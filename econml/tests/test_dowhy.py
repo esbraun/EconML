@@ -33,8 +33,7 @@ class TestDowhy(unittest.TestCase):
 
         Y, T, X, W, Z = self._get_data()
         # test at least one estimator from each category
-        models = {"dml": LinearDML(model_y=reg(), model_t=clf(), discrete_treatment=True,
-                                   linear_first_stages=False),
+        models = {"dml": LinearDML(model_y=reg(), model_t=clf(), discrete_treatment=True),
                   "dr": DRLearner(model_propensity=clf(), model_regression=reg(),
                                   model_final=reg()),
                   "forestdr": ForestDRLearner(model_propensity=clf(), model_regression=reg()),
@@ -63,6 +62,11 @@ class TestDowhy(unittest.TestCase):
                 else:
                     est_dowhy = est.dowhy.fit(Y, T, X=X, W=W)
                 # test causal graph
+                # need to set matplotlib backend before viewing model
+
+                import matplotlib
+                matplotlib.use('Agg')
+
                 est_dowhy.view_model(layout=None)
                 # test refutation estimate
                 est_dowhy.refute_estimate(method_name="random_common_cause", num_simulations=3)

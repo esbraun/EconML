@@ -2,7 +2,10 @@
 # Licensed under the MIT License.
 """Collection of scikit-learn extensions for model selection techniques."""
 
+from inspect import signature
+import inspect
 import numbers
+from typing import List, Optional
 import warnings
 import abc
 
@@ -12,7 +15,8 @@ import scipy.sparse as sp
 import sklearn
 from joblib import Parallel, delayed
 from sklearn.base import BaseEstimator, clone, is_classifier
-from sklearn.ensemble import RandomForestClassifier, RandomForestRegressor
+from sklearn.ensemble import (GradientBoostingClassifier, GradientBoostingRegressor,
+                              RandomForestClassifier, RandomForestRegressor)
 from sklearn.exceptions import FitFailedWarning
 from sklearn.linear_model import (ElasticNet, ElasticNetCV, Lasso, LassoCV, MultiTaskElasticNet, MultiTaskElasticNetCV,
                                   MultiTaskLasso, MultiTaskLassoCV, Ridge, RidgeCV, RidgeClassifier, RidgeClassifierCV,
@@ -23,7 +27,9 @@ from sklearn.model_selection import (BaseCrossValidator, GridSearchCV, GroupKFol
 # TODO: conisder working around relying on sklearn implementation details
 from sklearn.model_selection._validation import (_check_is_permutation,
                                                  _fit_and_predict)
-from sklearn.preprocessing import LabelEncoder, StandardScaler
+from sklearn.neural_network import MLPClassifier, MLPRegressor
+from sklearn.pipeline import Pipeline, make_pipeline
+from sklearn.preprocessing import LabelEncoder, PolynomialFeatures, StandardScaler
 from sklearn.utils import check_random_state, indexable
 from sklearn.utils.multiclass import type_of_target
 from sklearn.utils.validation import _num_samples
@@ -276,9 +282,10 @@ class ModelSelector(metaclass=abc.ABCMeta):
     """
 
     @abc.abstractmethod
-    def train(self, is_selecting: bool, *args, **kwargs):
+    def train(self, is_selecting: bool, folds: Optional[List], *args, **kwargs):
         """
         Either selects a model or fits a model, depending on the value of `is_selecting`.
+        If `is_selecting` is `False`, then `folds` should not be provided because they are only during selection.
         """
         raise NotImplementedError("Abstract method")
 
@@ -295,6 +302,15 @@ class ModelSelector(metaclass=abc.ABCMeta):
         """
         Gets the score of the selected model on the given data; should not be called until after `train` has been used
         both to select a model and to fit it.
+        """
+        raise NotImplementedError("Abstract method")
+
+    @property
+    @abc.abstractmethod
+    def needs_fit(self):
+        """
+        Whether the model selector needs to be fit before it can be used for prediction or scoring;
+        in many cases this is equivalent to whether the selector is choosing between multiple models
         """
         raise NotImplementedError("Abstract method")
 
@@ -333,7 +349,7 @@ class SingleModelSelector(ModelSelector):
             return None
 
 
-def _fit_with_groups(model, X, y, *, groups, **kwargs):
+def _fit_with_groups(model, X, y, *, sub_model=None, groups, **kwargs):
     """
     Fits a model while correctly handling grouping if necessary.
 
@@ -349,8 +365,10 @@ def _fit_with_groups(model, X, y, *, groups, **kwargs):
     rows that GroupKFold would have generated rather than using GroupKFold as the cv instance.
     """
     if groups is not None:
-        if hasattr(model, 'cv'):
-            old_cv = model.cv
+        if sub_model is None:
+            sub_model = model
+        if hasattr(sub_model, 'cv'):
+            old_cv = sub_model.cv
             # logic copied from check_cv
             cv = 5 if old_cv is None else old_cv
             if isinstance(cv, numbers.Integral):
@@ -360,10 +378,10 @@ def _fit_with_groups(model, X, y, *, groups, **kwargs):
 
             splits = list(cv.split(X, y, groups=groups))
             try:
-                model.cv = splits
+                sub_model.cv = splits
                 return model.fit(X, y, **kwargs)  # drop groups from arg list
             finally:
-                model.cv = old_cv
+                sub_model.cv = old_cv
 
     # drop groups from arg list, which were already used at the outer level and may not be supported by the model
     return model.fit(X, y, **kwargs)
@@ -371,19 +389,31 @@ def _fit_with_groups(model, X, y, *, groups, **kwargs):
 
 class FixedModelSelector(SingleModelSelector):
     """
-    Model selection class that always selects the given model
+    Model selection class that always selects the given sklearn-compatible model
     """
 
     def __init__(self, model):
         self.model = clone(model, safe=False)
 
-    def train(self, is_selecting, *args, groups=None, **kwargs):
-        # whether selecting or not, need to train the model on the data
-        _fit_with_groups(self.model, *args, groups=groups, **kwargs)
-        if is_selecting and hasattr(self.model, 'score'):
-            # TODO: we need to alter this to use out-of-sample score here, which
-            #       will require cross-validation, but should respect grouping, stratifying, etc.
-            self._score = self.model.score(*args, **kwargs)
+    def train(self, is_selecting, folds: Optional[List], X, y, groups=None, **kwargs):
+        if is_selecting:
+            # since needs_fit is False, is_selecting will only be true if
+            # the score needs to be compared to another model's
+            # so we don't need to fit the model itself, just get the out-of-sample score
+            assert hasattr(self.model, 'score'), (f"Can't select between a fixed {type(self.model)} model and others "
+                                                  "because it doesn't have a score method")
+            scores = []
+            for train, test in folds:
+                # use _fit_with_groups instead of just fit to handle nested grouping
+                _fit_with_groups(self.model, X[train], y[train],
+                                 groups=None if groups is None else groups[train],
+                                 **{key: val[train] for key, val in kwargs.items()})
+                scores.append(self.model.score(X[test], y[test]))
+            self._score = np.mean(scores)
+        else:
+            # we need to train the model on the data
+            _fit_with_groups(self.model, X, y, groups=groups, **kwargs)
+
         return self
 
     @property
@@ -394,22 +424,22 @@ class FixedModelSelector(SingleModelSelector):
     def best_score(self):
         return self._score
 
+    @property
+    def needs_fit(self):
+        return False  # We have only a single model so we can skip the selection process
+
 
 def _copy_to(m1, m2, attrs, insert_underscore=False):
     for attr in attrs:
         setattr(m2, attr, getattr(m1, attr + "_" if insert_underscore else attr))
 
 
-def _convert_linear_model(model, new_cls, extra_attrs=[]):
+def _convert_linear_model(model, new_cls):
     new_model = new_cls()
     # copy common parameters
-    _copy_to(model, new_model, ["fit_intercept", "max_iter",
-                                "tol",
-                                "random_state"])
+    _copy_to(model, new_model, ["fit_intercept"])
     # copy common fitted variables
-    _copy_to(model, new_model, ["coef_", "intercept_", "n_features_in_", "n_iter_"])
-    # copy attributes unique to this class
-    _copy_to(model, new_model, extra_attrs)
+    _copy_to(model, new_model, ["coef_", "intercept_", "n_features_in_"])
     return new_model
 
 
@@ -418,7 +448,8 @@ def _to_logisticRegression(model: LogisticRegressionCV):
     _copy_to(model, lr, ["penalty", "dual", "intercept_scaling",
                          "class_weight",
                          "solver", "multi_class",
-                         "verbose", "n_jobs"])
+                         "verbose", "n_jobs",
+                         "tol", "max_iter", "random_state", "n_iter_"])
     _copy_to(model, lr, ["classes_"])
 
     _copy_to(model, lr, ["C", "l1_ratio"], True)  # these are arrays in LogisticRegressionCV, need to convert them next
@@ -435,21 +466,26 @@ def _to_logisticRegression(model: LogisticRegressionCV):
 
 
 def _convert_linear_regression(model, new_cls, extra_attrs=["positive"]):
-    new_model = _convert_linear_model(model, new_cls, ["copy_X",
-                                                       "n_iter_"])
+    new_model = _convert_linear_model(model, new_cls)
     _copy_to(model, new_model, ["alpha"], True)
     return new_model
 
 
-def _to_elasticNet(model: ElasticNetCV, is_lasso=False, cls=None, extra_attrs=[]):
+def _to_elasticNet(model: ElasticNetCV, args, kwargs, is_lasso=False, cls=None, extra_attrs=[]):
+    # We need an R^2 score to compare to other models; ElasticNetCV doesn't provide it,
+    # but we can calculate it ourselves from the MSE plus the variance of the target y
+    y = signature(model.fit).bind(*args, **kwargs).arguments["y"]
     cls = cls or (Lasso if is_lasso else ElasticNet)
-    new_model = _convert_linear_regression(model, cls, extra_attrs + ['selection', 'warm_start',
-                                                                      'dual_gap_'])
+    new_model = _convert_linear_regression(model, cls, extra_attrs + ['selection', 'warm_start', 'dual_gap_',
+                                                                      'tol', 'max_iter', 'random_state', 'n_iter_',
+                                                                      'copy_X'])
     if not is_lasso:
         # l1 ratio doesn't apply to Lasso, only ElasticNet
         _copy_to(model, new_model, ["l1_ratio"], True)
-    max_score = np.max(np.mean(model.mse_path_, axis=-1))  # last dimension in mse_path is folds, so average over that
-    return new_model, max_score
+    # max R^2 corresponds to min MSE
+    min_mse = np.min(np.mean(model.mse_path_, axis=-1))  # last dimension in mse_path is folds, so average over that
+    r2 = 1 - min_mse / np.var(y)  # R^2 = 1 - MSE / Var(y)
+    return new_model, r2
 
 
 def _to_ridge(model, cls=Ridge, extra_attrs=["positive"]):
@@ -472,38 +508,66 @@ class SklearnCVSelector(SingleModelSelector):
 
     @staticmethod
     def can_wrap(model):
+        if isinstance(model, Pipeline):
+            return SklearnCVSelector.can_wrap(model.steps[-1][1])
         return any(isinstance(model, model_type) for model_type in SklearnCVSelector.convertible_types())
 
     @staticmethod
     def _model_mapping():
-        return {LogisticRegressionCV: _to_logisticRegression,
-                ElasticNetCV: _to_elasticNet,
-                LassoCV: lambda model: _to_elasticNet(model, True, None, ["positive"]),
-                RidgeCV: _to_ridge,
-                RidgeClassifierCV: lambda model: _to_ridge(model, RidgeClassifier, ["positive", "class_weight",
-                                                                                    "_label_binarizer"]),
-                MultiTaskElasticNetCV: lambda model: _to_elasticNet(model, False, MultiTaskElasticNet, extra_attrs=[]),
-                MultiTaskLassoCV: lambda model: _to_elasticNet(model, True, MultiTaskLasso, extra_attrs=[]),
-                WeightedLassoCVWrapper: lambda model: _to_elasticNet(model, True, WeightedLassoWrapper,
-                                                                     extra_attrs=[]),
+        return {LogisticRegressionCV: lambda model, _args, _kwargs: _to_logisticRegression(model),
+                ElasticNetCV: lambda model, args, kwargs: _to_elasticNet(model, args, kwargs),
+                LassoCV: lambda model, args, kwargs: _to_elasticNet(model, args, kwargs, True, None, ["positive"]),
+                RidgeCV: lambda model, _args, _kwargs: _to_ridge(model),
+                RidgeClassifierCV: lambda model, _args, _kwargs: _to_ridge(model, RidgeClassifier,
+                                                                           ["positive", "class_weight",
+                                                                            "_label_binarizer"]),
+                MultiTaskElasticNetCV: lambda model, args, kwargs: _to_elasticNet(model, args, kwargs,
+                                                                                  False, MultiTaskElasticNet,
+                                                                                  extra_attrs=[]),
+                MultiTaskLassoCV: lambda model, args, kwargs: _to_elasticNet(model, args, kwargs,
+                                                                             True, MultiTaskLasso, extra_attrs=[]),
+                WeightedLassoCVWrapper: lambda model, args, kwargs: _to_elasticNet(model, args, kwargs,
+                                                                                   True, WeightedLassoWrapper,
+                                                                                   extra_attrs=[]),
                 }
 
-    def train(self, is_selecting: bool, *args, groups=None, **kwargs):
+    @staticmethod
+    def _convert_model(model, args, kwargs):
+        if isinstance(model, Pipeline):
+            name, inner_model = model.steps[-1]
+            best_model, score = SklearnCVSelector._convert_model(inner_model, args, kwargs)
+            return Pipeline(steps=[*model.steps[:-1], (name, best_model)]), score
+
+        if isinstance(model, GridSearchCV) or isinstance(model, RandomizedSearchCV):
+            return model.best_estimator_, model.best_score_
+
+        for known_type in SklearnCVSelector._model_mapping().keys():
+            if isinstance(model, known_type):
+                converter = SklearnCVSelector._model_mapping()[known_type]
+                return converter(model, args, kwargs)
+
+    def train(self, is_selecting: bool, folds: Optional[List], *args, groups=None, **kwargs):
         if is_selecting:
-            _fit_with_groups(self.searcher, *args, groups=groups, **kwargs)
+            sub_model = self.searcher
+            if isinstance(self.searcher, Pipeline):
+                sub_model = self.searcher.steps[-1][1]
 
-            if isinstance(self.searcher, GridSearchCV) or isinstance(self.searcher, RandomizedSearchCV):
-                self._best_model = self.searcher.best_estimator_
-                self._best_score = self.searcher.best_score_
+            init_params = inspect.signature(sub_model.__init__).parameters
+            if 'cv' in init_params:
+                default_cv = init_params['cv'].default
+            else:
+                # constructor takes cv as a positional or kwarg, just pull it out of a new instance
+                default_cv = type(sub_model)().cv
 
-            for known_type in self._model_mapping().keys():
-                if isinstance(self.searcher, known_type):
-                    converter = self._model_mapping()[known_type]
-                    self._best_model, self._best_score = converter(self.searcher)
-                    return self
+            if sub_model.cv != default_cv:
+                warnings.warn(f"Model {sub_model} has a non-default cv attribute, which will be ignored")
+            sub_model.cv = folds
+
+            self.searcher.fit(*args, **kwargs)
+
+            self._best_model, self._best_score = self._convert_model(self.searcher, args, kwargs)
 
         else:
-            # don't need to use _fit_with_groups here since none of these models support it
             self.best_model.fit(*args, **kwargs)
         return self
 
@@ -514,6 +578,11 @@ class SklearnCVSelector(SingleModelSelector):
     @property
     def best_score(self):
         return self._best_score
+
+    @property
+    def needs_fit(self):
+        return True  # strictly speaking, could be false if the hyperparameters are fixed
+        # but it would be complicated to check that
 
 
 class ListSelector(SingleModelSelector):
@@ -532,18 +601,19 @@ class ListSelector(SingleModelSelector):
         self.models = [clone(model, safe=False) for model in models]
         self.unwrap = unwrap
 
-    def train(self, is_selecting, *args, **kwargs):
+    def train(self, is_selecting, folds: Optional[List], *args, **kwargs):
+        assert len(self.models) > 0, "ListSelector must have at least one model"
         if is_selecting:
             scores = []
             for model in self.models:
-                model.train(is_selecting, *args, **kwargs)
+                model.train(is_selecting, folds, *args, **kwargs)
                 scores.append(model.best_score)
             self._all_scores = scores
             self._best_score = np.max(scores)
             self._best_model = self.models[np.argmax(scores)]
 
         else:
-            self._best_model.train(is_selecting, *args, **kwargs)
+            self._best_model.train(is_selecting, folds, *args, **kwargs)
 
     @property
     def best_model(self):
@@ -557,14 +627,31 @@ class ListSelector(SingleModelSelector):
     def best_score(self):
         return self._best_score
 
+    @property
+    def needs_fit(self):
+        # technically, if there is just one model and it doesn't need to be fit we don't need to fit it,
+        # but that complicates the training logic so we don't bother with that case
+        return True
+
 
 def get_selector(input, is_discrete, *, random_state=None, cv=None, wrapper=GridSearchCV):
     named_models = {
         'linear': (LogisticRegressionCV(random_state=random_state, cv=cv) if is_discrete
                    else WeightedLassoCVWrapper(random_state=random_state, cv=cv)),
+        'poly': ([make_pipeline(PolynomialFeatures(d),
+                                (LogisticRegressionCV(random_state=random_state, cv=cv) if is_discrete
+                                 else WeightedLassoCVWrapper(random_state=random_state, cv=cv)))
+                  for d in range(1, 4)]),
         'forest': (GridSearchCV(RandomForestClassifier(random_state=random_state) if is_discrete
                                 else RandomForestRegressor(random_state=random_state),
                                 param_grid={}, cv=cv)),
+        'gbf': (GridSearchCV(GradientBoostingClassifier(random_state=random_state) if is_discrete
+                             else GradientBoostingRegressor(random_state=random_state),
+                             param_grid={}, cv=cv)),
+        'nnet': (GridSearchCV(MLPClassifier(random_state=random_state) if is_discrete
+                              else MLPRegressor(random_state=random_state),
+                              param_grid={}, cv=cv)),
+        'automl': ["poly", "forest", "gbf", "nnet"],
     }
     if isinstance(input, ModelSelector):  # we've already got a model selector, don't need to do anything
         return input
@@ -755,13 +842,17 @@ def _cross_val_predict(estimator, X, y=None, *, groups=None, cv=None,
     # independent, and that it is pickle-able.
     parallel = Parallel(n_jobs=n_jobs, verbose=verbose,
                         pre_dispatch=pre_dispatch)
-    predictions = parallel(delayed(_fit_and_predict)(
-        clone(estimator, safe=safe), X, y, train, test, verbose, fit_params, method)
-        for train, test in splits)
+
     from pkg_resources import parse_version
-    if parse_version(sklearn.__version__) < parse_version("0.24.0"):
-        # Prior to 0.24.0, this private scikit-learn method returned a tuple of two values
-        predictions = [p[0] for p in predictions]
+    # verbose was removed from sklearn's non-public _fit_and_predict method in 1.4
+    if parse_version(sklearn.__version__) < parse_version("1.4"):
+        predictions = parallel(delayed(_fit_and_predict)(
+            clone(estimator, safe=safe), X, y, train, test, verbose, fit_params, method)
+            for train, test in splits)
+    else:
+        predictions = parallel(delayed(_fit_and_predict)(
+            clone(estimator, safe=safe), X, y, train, test, fit_params, method)
+            for train, test in splits)
 
     inv_test_indices = np.empty(len(test_indices), dtype=int)
     inv_test_indices[test_indices] = np.arange(len(test_indices))

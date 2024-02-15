@@ -51,9 +51,11 @@ For information on use cases and background material on causal inference and het
 
 # News
 
-** November 11, 2023:** Release v0.15.0b1, see release notes [here](https://github.com/py-why/EconML/releases/tag/v0.15.0b1)
+**February 12, 2024:** Release v0.15.0, see release notes [here](https://github.com/py-why/EconML/releases/tag/v0.15.0)
 
 <details><summary>Previous releases</summary>
+
+**November 11, 2023:** Release v0.15.0b1, see release notes [here](https://github.com/py-why/EconML/releases/tag/v0.15.0b1)
 
 **May 19, 2023:** Release v0.14.1, see release notes [here](https://github.com/py-why/EconML/releases/tag/v0.14.1)
 
@@ -509,7 +511,7 @@ See the <a href="#references">References</a> section for more details.
   reg = lambda: RandomForestRegressor(min_samples_leaf=20)
   clf = lambda: RandomForestClassifier(min_samples_leaf=20)
   models = [('ldml', LinearDML(model_y=reg(), model_t=clf(), discrete_treatment=True,
-                               linear_first_stages=False, cv=3)),
+                               cv=3)),
             ('xlearner', XLearner(models=reg(), cate_models=reg(), propensity_model=clf())),
             ('dalearner', DomainAdaptationLearner(models=reg(), final_models=reg(), propensity_model=clf())),
             ('slearner', SLearner(overall_model=reg())),
@@ -521,7 +523,7 @@ See the <a href="#references">References</a> section for more details.
                                model_final=LassoCV(cv=3, fit_intercept=False),
                                discrete_treatment=True,
                                featurizer=PolynomialFeatures(degree=3),
-                               linear_first_stages=False, cv=3))
+                               cv=3))
   ]
 
   # fit cate models on train data

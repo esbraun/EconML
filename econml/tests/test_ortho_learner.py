@@ -3,7 +3,6 @@
 
 from sklearn.datasets import make_regression
 from econml._ortho_learner import _OrthoLearner, _crossfit
-from sklearn.linear_model import LinearRegression
 from sklearn.preprocessing import PolynomialFeatures
 from sklearn.linear_model import LinearRegression, LassoCV, Lasso
 from sklearn.model_selection import KFold
@@ -28,7 +27,7 @@ class TestOrthoLearner(unittest.TestCase):
             def __init__(self, model):
                 self._model = model
 
-            def train(self, is_selecting, X, y, Q, W=None):
+            def train(self, is_selecting, folds, X, y, Q, W=None):
                 self._model.fit(X, y)
                 return self
 
@@ -37,6 +36,10 @@ class TestOrthoLearner(unittest.TestCase):
 
             def score(self, X, y, Q, W=None):
                 return self._model.score(X, y)
+
+            @property
+            def needs_fit(self):
+                return False
 
         np.random.seed(123)
         X = np.random.normal(size=(5000, 3))
@@ -108,12 +111,16 @@ class TestOrthoLearner(unittest.TestCase):
             def __init__(self, model):
                 self._model = model
 
-            def train(self, is_selecting, X, y, W=None):
+            def train(self, is_selecting, folds, X, y, W=None):
                 self._model.fit(X, y)
                 return self
 
             def predict(self, X, y, W=None):
                 return self._model.predict(X), y - self._model.predict(X), X
+
+            @property
+            def needs_fit(self):
+                return False
 
         np.random.seed(123)
         X = np.random.normal(size=(5000, 3))
@@ -178,7 +185,7 @@ class TestOrthoLearner(unittest.TestCase):
                 def __init__(self, model):
                     self._model = model
 
-                def train(self, is_selecting, X, y, Q, W=None):
+                def train(self, is_selecting, folds, X, y, Q, W=None):
                     self._model.fit(X, y)
                     return self
 
@@ -187,6 +194,10 @@ class TestOrthoLearner(unittest.TestCase):
 
                 def score(self, X, y, Q, W=None):
                     return self._model.score(X, y)
+
+                @property
+                def needs_fit(self):
+                    return False
 
             # Generate synthetic data
             X, y = make_regression(n_samples=10, n_features=5, noise=0.1, random_state=42)
@@ -218,13 +229,17 @@ class TestOrthoLearner(unittest.TestCase):
                 self._model_t = model_t
                 self._model_y = model_y
 
-            def train(self, is_selecting, Y, T, W=None):
+            def train(self, is_selecting, folds, Y, T, W=None):
                 self._model_t.fit(W, T)
                 self._model_y.fit(W, Y)
                 return self
 
             def predict(self, Y, T, W=None):
                 return Y - self._model_y.predict(W), T - self._model_t.predict(W)
+
+            @property
+            def needs_fit(self):
+                return False
 
         class ModelFinal:
 
@@ -330,13 +345,17 @@ class TestOrthoLearner(unittest.TestCase):
                 self._model_t = model_t
                 self._model_y = model_y
 
-            def train(self, is_selecting, Y, T, W=None):
+            def train(self, is_selecting, folds, Y, T, W=None):
                 self._model_t.fit(W, T)
                 self._model_y.fit(W, Y)
                 return self
 
             def predict(self, Y, T, W=None):
                 return Y - self._model_y.predict(W), T - self._model_t.predict(W)
+
+            @property
+            def needs_fit(self):
+                return False
 
         class ModelFinal:
 
@@ -378,7 +397,7 @@ class TestOrthoLearner(unittest.TestCase):
                 self._model_t = model_t
                 self._model_y = model_y
 
-            def train(self, is_selecting, Y, T, W=None):
+            def train(self, is_selecting, folds, Y, T, W=None):
                 self._model_t.fit(W, T)
                 self._model_y.fit(W, Y)
                 return self
@@ -388,6 +407,10 @@ class TestOrthoLearner(unittest.TestCase):
 
             def score(self, Y, T, W=None):
                 return (self._model_t.score(W, Y), self._model_y.score(W, T))
+
+            @property
+            def needs_fit(self):
+                return False
 
         class ModelFinal:
 
@@ -435,13 +458,17 @@ class TestOrthoLearner(unittest.TestCase):
                 self._model_t = model_t
                 self._model_y = model_y
 
-            def train(self, is_selecting, Y, T, W=None):
+            def train(self, is_selecting, folds, Y, T, W=None):
                 self._model_t.fit(W, np.matmul(T, np.arange(1, T.shape[1] + 1)))
                 self._model_y.fit(W, Y)
                 return self
 
             def predict(self, Y, T, W=None):
                 return Y - self._model_y.predict(W), T - self._model_t.predict_proba(W)[:, 1:]
+
+            @property
+            def needs_fit(self):
+                return False
 
         class ModelFinal:
 

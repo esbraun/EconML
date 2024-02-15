@@ -48,10 +48,12 @@ class _ModelNuisance(ModelSelector):
         self._model_y = model_y
         self._model_t = model_t
 
-    def train(self, is_selecting, Y, T, X=None, W=None, Z=None, sample_weight=None, groups=None):
+    def train(self, is_selecting, folds, Y, T, X=None, W=None, Z=None, sample_weight=None, groups=None):
         assert Z is None, "Cannot accept instrument!"
-        self._model_t.train(is_selecting, X, W, T, **filter_none_kwargs(sample_weight=sample_weight, groups=groups))
-        self._model_y.train(is_selecting, X, W, Y, **filter_none_kwargs(sample_weight=sample_weight, groups=groups))
+        self._model_t.train(is_selecting, folds, X, W, T, **
+                            filter_none_kwargs(sample_weight=sample_weight, groups=groups))
+        self._model_y.train(is_selecting, folds, X, W, Y, **
+                            filter_none_kwargs(sample_weight=sample_weight, groups=groups))
         return self
 
     def score(self, Y, T, X=None, W=None, Z=None, sample_weight=None, groups=None):
@@ -69,6 +71,10 @@ class _ModelNuisance(ModelSelector):
         Y_res = Y - Y_pred.reshape(Y.shape)
         T_res = T - T_pred.reshape(T.shape)
         return Y_res, T_res
+
+    @property
+    def needs_fit(self):
+        return self._model_y.needs_fit or self._model_t.needs_fit
 
 
 class _ModelFinal:
@@ -219,7 +225,7 @@ class _RLearner(_OrthoLearner):
         class ModelSelector(SingleModelSelector):
             def __init__(self, model):
                 self._model = ModelFirst(model)
-            def train(self, is_selecting, X, W, Y, sample_weight=None):
+            def train(self, is_selecting, folds, X, W, Y, sample_weight=None):
                 self._model.fit(X, W, Y, sample_weight=sample_weight)
                 return self
             @property
@@ -228,6 +234,9 @@ class _RLearner(_OrthoLearner):
             @property
             def best_score(self):
                 return 0
+            @property
+            def needs_fit(self):
+                return False
         class ModelFinal:
             def fit(self, X, T, T_res, Y_res, sample_weight=None, freq_weight=None, sample_var=None):
                 self.model = LinearRegression(fit_intercept=False).fit(X * T_res.reshape(-1, 1),

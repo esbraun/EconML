@@ -268,35 +268,23 @@ class CausalForestDML(_BaseDML):
 
     Parameters
     ----------
-    model_y: estimator, {'linear', 'forest'}, list of str/estimator, or 'auto'
+    model_y: estimator, default ``'auto'``
+        Determines how to fit the outcome to the features.
+
+        - If ``'auto'``, the model will be the best-fitting of a set of linear and forest models
+
+        - Otherwise, see :ref:`model_selection` for the range of supported options;
+          if a single model is specified it should be a classifier if `discrete_outcome` is True
+          and a regressor otherwise
+
+    model_t: estimator, default ``'auto'``
         Determines how to fit the treatment to the features.
 
-        - If an estimator, will use the model as is for fitting.
-        - If str, will use model associated with the keyword.
+        - If ``'auto'``, the model will be the best-fitting of a set of linear and forest models
 
-            - 'linear' - LogisticRegressionCV if discrete_outcome=True else WeightedLassoCVWrapper
-            - 'forest' - RandomForestClassifier if discrete_outcome=True else RandomForestRegressor
-        - If list, will perform model selection on the supplied list, which can be a mix of str and estimators, \
-            and then use the best estimator for fitting.
-        - If 'auto', model will select over linear and forest models
-
-        User-supplied estimators should support 'fit' and 'predict' methods,
-        and additionally 'predict_proba' if discrete_outcome=True.
-
-    model_t: estimator, {'linear', 'forest'}, list of str/estimator, or 'auto', default 'auto'
-        Determines how to fit the treatment to the features. str in a sentence
-
-        - If an estimator, will use the model as is for fitting.
-        - If str, will use model associated with the keyword.
-
-            - 'linear' - LogisticRegressionCV if discrete_treatment=True else WeightedLassoCVWrapper
-            - 'forest' - RandomForestClassifier if discrete_treatment=True else RandomForestRegressor
-        - If list, will perform model selection on the supplied list, which can be a mix of str and estimators, \
-            and then use the best estimator for fitting.
-        - If 'auto', model will select over linear and forest models
-
-        User-supplied estimators should support 'fit' and 'predict' methods,
-        and additionally 'predict_proba' if discrete_treatment=True.
+        - Otherwise, see :ref:`model_selection` for the range of supported options;
+          if a single model is specified it should be a classifier if `discrete_treatment` is True
+          and a regressor otherwise
 
     featurizer : :term:`transformer`, optional
         Must support fit_transform and transform. Used to create composite features in the final CATE regression.
@@ -569,10 +557,10 @@ class CausalForestDML(_BaseDML):
         est.fit(y, T, X=X, W=None)
 
     >>> est.effect(X[:3])
-    array([0.88518..., 1.25061..., 0.81112...])
+    array([0.62947..., 1.64576..., 0.68496... ])
     >>> est.effect_interval(X[:3])
-    (array([0.40163..., 0.75023..., 0.46629...]),
-    array([1.36873..., 1.75099..., 1.15596...]))
+    (array([0.19136...  , 1.17143..., 0.10789...]),
+    array([1.06758..., 2.12009..., 1.26203...]))
 
     Attributes
     ----------

@@ -14,8 +14,6 @@ import argparse
 import warnings
 import joblib
 from sklearn.model_selection import GridSearchCV
-from statsmodels.tools.tools import add_constant
-from econml.utilities import cross_product
 from sklearn.multioutput import MultiOutputRegressor
 
 
@@ -251,7 +249,7 @@ def run_all_mc(first_stage, folder, n_list, n_exp, hetero_coef_list, d_list,
                                     (hetero_coef * X[:, [0]] + 1) * np.random.normal(0, 1, size=(n, p))
 
                                 XT = np.hstack([X, T])
-                                X1, X2, y1, y2, X_final_first, X_final_sec, y_sum_first, y_sum_sec,\
+                                X1, X2, y1, y2, X_final_first, X_final_sec, y_sum_first, y_sum_sec, \
                                     n_sum_first, n_sum_sec, var_first, var_sec = _summarize(XT, y)
                                 X = np.vstack([X1, X2])
                                 y = np.concatenate((y1, y2))
@@ -275,7 +273,6 @@ def run_all_mc(first_stage, folder, n_list, n_exp, hetero_coef_list, d_list,
                                     est = LinearDML(model_y=first_stage(),
                                                     model_t=first_stage(),
                                                     cv=SplitterSum(),
-                                                    linear_first_stages=False,
                                                     discrete_treatment=False)
                                     est.fit(y_sum,
                                             X_final[:, -d_t:],
@@ -296,7 +293,6 @@ def run_all_mc(first_stage, folder, n_list, n_exp, hetero_coef_list, d_list,
                                     lr = LinearDML(model_y=first_stage(),
                                                    model_t=first_stage(),
                                                    cv=Splitter(),
-                                                   linear_first_stages=False,
                                                    discrete_treatment=False)
                                     lr.fit(y, X[:, -d_t:], X=X[:, :d_x], W=X[:, d_x:-d_t],
                                            inference=StatsModelsInference(cov_type=cov_type))
@@ -422,7 +418,8 @@ def monte_carlo_gcv(folder='gcv'):
                                                        min_samples_leaf=10, random_state=123),
                                  MultiOutputRegressor(GradientBoostingRegressor(n_estimators=20,
                                                                                 max_depth=3,
-                                                                                min_samples_leaf=10, random_state=123))],
+                                                                                min_samples_leaf=10,
+                                                                                random_state=123))],
                                 param_grid_list=[{},
                                                  {},
                                                  {},

@@ -72,7 +72,7 @@ class _ModelNuisance(ModelSelector):
     def _combine(self, X, W):
         return np.hstack([arr for arr in [X, W] if arr is not None])
 
-    def train(self, is_selecting, Y, T, X=None, W=None, *, sample_weight=None, groups=None):
+    def train(self, is_selecting, folds, Y, T, X=None, W=None, *, sample_weight=None, groups=None):
         if Y.ndim != 1 and (Y.ndim != 2 or Y.shape[1] != 1):
             raise ValueError("The outcome matrix must be of shape ({0}, ) or ({0}, 1), "
                              "instead got {1}.".format(len(X), Y.shape))
@@ -84,8 +84,8 @@ class _ModelNuisance(ModelSelector):
         XW = self._combine(X, W)
         filtered_kwargs = filter_none_kwargs(sample_weight=sample_weight)
 
-        self._model_propensity.train(is_selecting, XW, inverse_onehot(T), groups=groups, **filtered_kwargs)
-        self._model_regression.train(is_selecting, np.hstack([XW, T]), Y, groups=groups, **filtered_kwargs)
+        self._model_propensity.train(is_selecting, folds, XW, inverse_onehot(T), groups=groups, **filtered_kwargs)
+        self._model_regression.train(is_selecting, folds, np.hstack([XW, T]), Y, groups=groups, **filtered_kwargs)
         return self
 
     def score(self, Y, T, X=None, W=None, *, sample_weight=None, groups=None):
@@ -125,6 +125,10 @@ class _ModelNuisance(ModelSelector):
         T_complete = np.hstack(((np.all(T == 0, axis=1) * 1).reshape(-1, 1), T))
         propensities_weight = np.sum(propensities * T_complete, axis=1)
         return Y_pred.reshape(Y.shape + (T.shape[1] + 1,)), propensities_weight.reshape((n,))
+
+    @property
+    def needs_fit(self):
+        return self._model_propensity.needs_fit or self._model_regression.needs_fit
 
 
 def _make_first_stage_selector(model, is_discrete, random_state):
@@ -247,35 +251,22 @@ class DRLearner(_OrthoLearner):
 
     Parameters
     ----------
-    model_propensity : estimator, {'linear', 'forest'}, list of str/estimator, or 'auto', default 'auto'
-        Estimator for Pr[T=t | X, W]. Trained by regressing treatments on (features, controls) concatenated.
+    model_propensity: estimator, default ``'auto'``
+        Classifier for Pr[T=t | X, W]. Trained by regressing treatments on (features, controls) concatenated.
 
-        - If an estimator, will use the model as is for fitting.
-        - If str, will use model associated with the keyword.
+        - If ``'auto'``, the model will be the best-fitting of a set of linear and forest models
 
-            - 'linear' - LogisticRegressionCV
-            - 'forest' - RandomForestClassifier
-        - If list, will perform model selection on the supplied list, which can be a mix of str and estimators, \
-            and then use the best estimator for fitting.
-        - If 'auto', model will select over linear and forest models
+        - Otherwise, see :ref:`model_selection` for the range of supported options
 
-        User-supplied estimators should support 'fit' and 'predict', and 'predict_proba'.
-
-    model_regression : estimator, {'linear', 'forest'}, list of str/estimator, or 'auto'
+    model_regression: estimator, default ``'auto'``
         Estimator for E[Y | X, W, T]. Trained by regressing Y on (features, controls, one-hot-encoded treatments)
         concatenated. The one-hot-encoding excludes the baseline treatment.
 
-        - If an estimator, will use the model as is for fitting.
-        - If str, will use model associated with the keyword.
+        - If ``'auto'``, the model will be the best-fitting of a set of linear and forest models
 
-            - 'linear' - LogisticRegressionCV if discrete_outcome=True else WeightedLassoCVWrapper
-            - 'forest' - RandomForestClassifier if discrete_outcome=True else RandomForestRegressor
-        - If list, will perform model selection on the supplied list, which can be a mix of str and estimators, \
-            and then use the best estimator for fitting.
-        - If 'auto', model will select over linear and forest models
-
-        User-supplied estimators should support 'fit' and 'predict' methods,
-        and additionally 'predict_proba' if discrete_outcome=True.
+        - Otherwise, see :ref:`model_selection` for the range of supported options;
+          if a single model is specified it should be a classifier if `discrete_outcome` is True
+          and a regressor otherwise
 
     model_final :
         estimator for the final cate model. Trained on regressing the doubly robust potential outcomes
@@ -374,29 +365,20 @@ class DRLearner(_OrthoLearner):
         est.fit(y, T, X=X, W=None)
 
     >>> est.const_marginal_effect(X[:2])
-    array([[0.520977..., 1.244073...],
-           [0.365645..., 0.749762...]])
+    array([[0.516931..., 0.995704...],
+           [0.356427..., 0.671870...]])
     >>> est.effect(X[:2], T0=0, T1=1)
-    array([0.520977..., 0.365645...])
+    array([0.516931..., 0.356427...])
     >>> est.score_
-    3.15958089...
+    2.84365756...
     >>> est.score(y, T, X=X)
-    2.60965712...
+    1.06259465...
     >>> est.model_cate(T=1).coef_
-    array([0.369069..., 0.016610..., 0.019072...])
+    array([ 0.447095..., -0.001013... ,  0.018982...])
     >>> est.model_cate(T=2).coef_
-    array([ 0.768336...,  0.082106..., -0.030475...])
+    array([ 0.925055..., -0.012357... ,  0.033489...])
     >>> est.cate_feature_names()
     ['X0', 'X1', 'X2']
-    >>> [mdl.coef_ for mdls in est.models_regression for mdl in mdls]
-    [array([ 1.463...,  0.006..., -0.006...,  0.726...,  2.029...]),
-    array([ 1.466..., -0.002...,  0...,  0.646...,  2.014...])]
-    >>> [mdl.coef_ for mdls in est.models_propensity for mdl in mdls]
-    [array([[-0.67903093,  0.04261741, -0.05969718],
-           [ 0.034..., -0.013..., -0.013...],
-           [ 0.644..., -0.028...,  0.073...]]), array([[-0.831...,  0.100...,  0.090...],
-           [ 0.084...,  0.013..., -0.154...],
-           [ 0.747..., -0.113...,  0.063...]])]
 
     Beyond default models:
 
@@ -418,19 +400,19 @@ class DRLearner(_OrthoLearner):
         est.fit(y, T, X=X, W=None)
 
     >>> est.score_
-    3.7...
+    1.7...
     >>> est.const_marginal_effect(X[:3])
-    array([[0.64..., 1.23...],
-           [0.49..., 0.92...],
-           [0.20..., 0.26...]])
+    array([[0.68..., 1.10...],
+           [0.56..., 0.79... ],
+           [0.34..., 0.10... ]])
     >>> est.model_cate(T=2).coef_
-    array([0.72..., 0.        , 0.        ])
+    array([0.74..., 0.        , 0.        ])
     >>> est.model_cate(T=2).intercept_
-    2.0...
+    1.9...
     >>> est.model_cate(T=1).coef_
-    array([0.31..., 0.01..., 0.00...])
+    array([0.24..., 0.00..., 0.        ])
     >>> est.model_cate(T=1).intercept_
-    0.97...
+    0.94...
 
     Attributes
     ----------
@@ -809,35 +791,22 @@ class LinearDRLearner(StatsModelsCateEstimatorDiscreteMixin, DRLearner):
 
     Parameters
     ----------
-    model_propensity : estimator, {'linear', 'forest'}, list of str/estimator, or 'auto', default 'auto'
-        Estimator for Pr[T=t | X, W]. Trained by regressing treatments on (features, controls) concatenated.
+    model_propensity: estimator, default ``'auto'``
+        Classifier for Pr[T=t | X, W]. Trained by regressing treatments on (features, controls) concatenated.
 
-        - If an estimator, will use the model as is for fitting.
-        - If str, will use model associated with the keyword.
+        - If ``'auto'``, the model will be the best-fitting of a set of linear and forest models
 
-            - 'linear' - LogisticRegressionCV
-            - 'forest' - RandomForestClassifier
-        - If list, will perform model selection on the supplied list, which can be a mix of str and estimators, \
-            and then use the best estimator for fitting.
-        - If 'auto', model will select over linear and forest models
+        - Otherwise, see :ref:`model_selection` for the range of supported options
 
-        User-supplied estimators should support 'fit' and 'predict', and 'predict_proba'.
-
-    model_regression : estimator, {'linear', 'forest'}, list of str/estimator, or 'auto'
+    model_regression: estimator, default ``'auto'``
         Estimator for E[Y | X, W, T]. Trained by regressing Y on (features, controls, one-hot-encoded treatments)
         concatenated. The one-hot-encoding excludes the baseline treatment.
 
-        - If an estimator, will use the model as is for fitting.
-        - If str, will use model associated with the keyword.
+        - If ``'auto'``, the model will be the best-fitting of a set of linear and forest models
 
-            - 'linear' - LogisticRegressionCV if discrete_outcome=True else WeightedLassoCVWrapper
-            - 'forest' - RandomForestClassifier if discrete_outcome=True else RandomForestRegressor
-        - If list, will perform model selection on the supplied list, which can be a mix of str and estimators, \
-            and then use the best estimator for fitting.
-        - If 'auto', model will select over linear and forest models
-
-        User-supplied estimators should support 'fit' and 'predict' methods,
-        and additionally 'predict_proba' if discrete_outcome=True.
+        - Otherwise, see :ref:`model_selection` for the range of supported options;
+          if a single model is specified it should be a classifier if `discrete_outcome` is True
+          and a regressor otherwise
 
     featurizer : :term:`transformer`, optional
         Must support fit_transform and transform. Used to create composite features in the final CATE regression.
@@ -890,6 +859,10 @@ class LinearDRLearner(StatsModelsCateEstimatorDiscreteMixin, DRLearner):
         Whether to allow missing values in W. If True, will need to supply model_propensity and
         model_regression that can handle missing values.
 
+    enable_federation: bool, default False
+        Whether to enable federation for the final model.  This has a memory cost so should be enabled only
+        if this model will be aggregated with other models.
+
     use_ray: bool, default False
         Whether to use Ray to parallelize the cross-fitting step. If True, Ray must be installed.
 
@@ -920,17 +893,17 @@ class LinearDRLearner(StatsModelsCateEstimatorDiscreteMixin, DRLearner):
         est.fit(y, T, X=X, W=None)
 
     >>> est.effect(X[:3])
-    array([0.457602..., 0.335707..., 0.011288...])
+    array([ 0.432476...,  0.359739..., -0.085326...])
     >>> est.effect_interval(X[:3])
-    (array([ 0.164623..., -0.098980..., -0.493464...]), array([0.750582..., 0.77039... , 0.516041...]))
+    (array([ 0.084145... , -0.178020..., -0.734688...]), array([0.780807..., 0.897500..., 0.564035...]))
     >>> est.coef_(T=1)
-    array([0.338061..., 0.025654..., 0.044389...])
+    array([ 0.450620..., -0.008792...,  0.075242...])
     >>> est.coef__interval(T=1)
-    (array([ 0.135677..., -0.155845..., -0.143376...]), array([0.540446..., 0.207155..., 0.232155...]))
+    (array([ 0.156233... , -0.252177..., -0.159805...]), array([0.745007..., 0.234592..., 0.310290...]))
     >>> est.intercept_(T=1)
-    0.78646497...
+    0.90916103...
     >>> est.intercept__interval(T=1)
-    (0.60344468..., 0.96948526...)
+    (0.66855287..., 1.14976919...)
 
     Attributes
     ----------
@@ -959,10 +932,12 @@ class LinearDRLearner(StatsModelsCateEstimatorDiscreteMixin, DRLearner):
                  mc_agg='mean',
                  random_state=None,
                  allow_missing=False,
+                 enable_federation=False,
                  use_ray=False,
                  ray_remote_func_options=None):
 
         self.fit_cate_intercept = fit_cate_intercept
+        self.enable_federation = enable_federation
         super().__init__(model_propensity=model_propensity,
                          model_regression=model_regression,
                          model_final=None,
@@ -984,7 +959,8 @@ class LinearDRLearner(StatsModelsCateEstimatorDiscreteMixin, DRLearner):
         return ['W'] if self.allow_missing else []
 
     def _gen_model_final(self):
-        return StatsModelsLinearRegression(fit_intercept=self.fit_cate_intercept)
+        return StatsModelsLinearRegression(fit_intercept=self.fit_cate_intercept,
+                                           enable_federation=self.enable_federation)
 
     def _gen_ortho_learner_model_final(self):
         return _ModelFinal(self._gen_model_final(), self._gen_featurizer(), False)
@@ -1094,35 +1070,22 @@ class SparseLinearDRLearner(DebiasedLassoCateEstimatorDiscreteMixin, DRLearner):
 
     Parameters
     ----------
-    model_propensity : estimator, {'linear', 'forest'}, list of str/estimator, or 'auto', default 'auto'
-        Estimator for Pr[T=t | X, W]. Trained by regressing treatments on (features, controls) concatenated.
+    model_propensity: estimator, default ``'auto'``
+        Classifier for Pr[T=t | X, W]. Trained by regressing treatments on (features, controls) concatenated.
 
-        - If an estimator, will use the model as is for fitting.
-        - If str, will use model associated with the keyword.
+        - If ``'auto'``, the model will be the best-fitting of a set of linear and forest models
 
-            - 'linear' - LogisticRegressionCV
-            - 'forest' - RandomForestClassifier
-        - If list, will perform model selection on the supplied list, which can be a mix of str and estimators, \
-            and then use the best estimator for fitting.
-        - If 'auto', model will select over linear and forest models
+        - Otherwise, see :ref:`model_selection` for the range of supported options
 
-        User-supplied estimators should support 'fit' and 'predict', and 'predict_proba'.
-
-    model_regression : estimator, {'linear', 'forest'}, list of str/estimator, or 'auto'
+    model_regression: estimator, default ``'auto'``
         Estimator for E[Y | X, W, T]. Trained by regressing Y on (features, controls, one-hot-encoded treatments)
         concatenated. The one-hot-encoding excludes the baseline treatment.
 
-        - If an estimator, will use the model as is for fitting.
-        - If str, will use model associated with the keyword.
+        - If ``'auto'``, the model will be the best-fitting of a set of linear and forest models
 
-            - 'linear' - LogisticRegressionCV if discrete_outcome=True else WeightedLassoCVWrapper
-            - 'forest' - RandomForestClassifier if discrete_outcome=True else RandomForestRegressor
-        - If list, will perform model selection on the supplied list, which can be a mix of str and estimators, \
-            and then use the best estimator for fitting.
-        - If 'auto', model will select over linear and forest models
-
-        User-supplied estimators should support 'fit' and 'predict' methods,
-        and additionally 'predict_proba' if discrete_outcome=True.
+        - Otherwise, see :ref:`model_selection` for the range of supported options;
+          if a single model is specified it should be a classifier if `discrete_outcome` is True
+          and a regressor otherwise
 
     featurizer : :term:`transformer`, optional
         Must support fit_transform and transform. Used to create composite features in the final CATE regression.
@@ -1235,17 +1198,17 @@ class SparseLinearDRLearner(DebiasedLassoCateEstimatorDiscreteMixin, DRLearner):
         est.fit(y, T, X=X, W=None)
 
     >>> est.effect(X[:3])
-    array([0.45..., 0.33..., 0.01...])
+    array([ 0.43...,  0.35..., -0.08...  ])
     >>> est.effect_interval(X[:3])
-    (array([ 0.11..., -0.13..., -0.54...]), array([0.79..., 0.80..., 0.57...]))
+    (array([-0.01..., -0.26..., -0.81...]), array([0.87..., 0.98..., 0.65...]))
     >>> est.coef_(T=1)
-    array([0.33..., 0.02..., 0.04...])
+    array([ 0.44..., -0.00...,  0.07...])
     >>> est.coef__interval(T=1)
-    (array([ 0.14..., -0.15..., -0.14...]), array([0.53..., 0.20..., 0.23...]))
+    (array([ 0.19... , -0.24..., -0.17...]), array([0.70..., 0.22..., 0.32...]))
     >>> est.intercept_(T=1)
-    0.78...
+    0.90...
     >>> est.intercept__interval(T=1)
-    (0.60..., 0.96...)
+    (0.66..., 1.14...)
 
     Attributes
     ----------
@@ -1396,35 +1359,22 @@ class ForestDRLearner(ForestModelFinalCateEstimatorDiscreteMixin, DRLearner):
 
     Parameters
     ----------
-    model_propensity : estimator, {'linear', 'forest'}, list of str/estimator, or 'auto', default 'auto'
-        Estimator for Pr[T=t | X, W]. Trained by regressing treatments on (features, controls) concatenated.
+    model_propensity: estimator, default ``'auto'``
+        Classifier for Pr[T=t | X, W]. Trained by regressing treatments on (features, controls) concatenated.
 
-        - If an estimator, will use the model as is for fitting.
-        - If str, will use model associated with the keyword.
+        - If ``'auto'``, the model will be the best-fitting of a set of linear and forest models
 
-            - 'linear' - LogisticRegressionCV
-            - 'forest' - RandomForestClassifier
-        - If list, will perform model selection on the supplied list, which can be a mix of str and estimators, \
-            and then use the best estimator for fitting.
-        - If 'auto', model will select over linear and forest models
+        - Otherwise, see :ref:`model_selection` for the range of supported options
 
-        User-supplied estimators should support 'fit' and 'predict', and 'predict_proba'.
-
-    model_regression : estimator, {'linear', 'forest'}, list of str/estimator, or 'auto'
+    model_regression: estimator, default ``'auto'``
         Estimator for E[Y | X, W, T]. Trained by regressing Y on (features, controls, one-hot-encoded treatments)
         concatenated. The one-hot-encoding excludes the baseline treatment.
 
-        - If an estimator, will use the model as is for fitting.
-        - If str, will use model associated with the keyword.
+        - If ``'auto'``, the model will be the best-fitting of a set of linear and forest models
 
-            - 'linear' - LogisticRegressionCV if discrete_outcome=True else WeightedLassoCVWrapper
-            - 'forest' - RandomForestClassifier if discrete_outcome=True else RandomForestRegressor
-        - If list, will perform model selection on the supplied list, which can be a mix of str and estimators, \
-            and then use the best estimator for fitting.
-        - If 'auto', model will select over linear and forest models
-
-        User-supplied estimators should support 'fit' and 'predict' methods,
-        and additionally 'predict_proba' if discrete_outcome=True.
+        - Otherwise, see :ref:`model_selection` for the range of supported options;
+          if a single model is specified it should be a classifier if `discrete_outcome` is True
+          and a regressor otherwise
 
     discrete_outcome: bool, default False
         Whether the outcome should be treated as binary

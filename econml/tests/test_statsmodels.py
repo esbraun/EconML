@@ -416,7 +416,7 @@ class TestStatsModels(unittest.TestCase):
                 "{}, {}".format(est.coef__interval()[1][t],
                                 np.array([scipy.stats.norm.ppf(.975, loc=1, scale=1)] +
                                          [scipy.stats.norm.ppf(.975, loc=0, scale=1)] * (d - 1)))
-            assert np.all(np.abs(est.intercept_[t]) <= 1e-12), "{}, {}".format(est.intercept_[t])
+            assert np.all(np.abs(est.intercept_[t]) <= 1e-12), "{}".format(est.intercept_[t])
             assert np.all(np.abs(est.intercept_stderr_[t]) <= 1e-12), "{}".format(est.intercept_stderr_[t])
             assert np.all(np.abs(est.intercept__interval()[0][t]) <=
                           1e-12), "{}".format(est.intercept__interval()[0][t])
@@ -446,7 +446,7 @@ class TestStatsModels(unittest.TestCase):
                 "{}, {}".format(est.coef__interval()[1][t],
                                 np.array([scipy.stats.norm.ppf(.975, loc=1, scale=np.sqrt(2))] +
                                          [scipy.stats.norm.ppf(.975, loc=0, scale=np.sqrt(2))] * (d - 1)))
-            assert np.all(np.abs(est.intercept_[t]) <= 1e-12), "{}, {}".format(est.intercept_[t])
+            assert np.all(np.abs(est.intercept_[t]) <= 1e-12), "{}".format(est.intercept_[t])
             assert np.all(np.abs(est.intercept_stderr_[t] - 1) <= 1e-12), "{}".format(est.intercept_stderr_[t])
             assert np.all(np.abs(est.intercept__interval()[0][t] -
                                  scipy.stats.norm.ppf(.025, loc=0, scale=1)) <= 1e-12), \
@@ -734,13 +734,11 @@ class TestStatsModels(unittest.TestCase):
                             est = LinearDML(
                                 model_y=first_stage_model,
                                 model_t=first_stage_model,
-                                cv=SplitterSum(),
-                                linear_first_stages=False)
+                                cv=SplitterSum())
                             lr = LinearDML(
                                 model_y=first_stage_model,
                                 model_t=first_stage_model,
-                                cv=Splitter(),
-                                linear_first_stages=False)
+                                cv=Splitter())
 
                             est.fit(y_sum,
                                     X_final[:, -1], X=X_final[:, :-1],
@@ -1138,8 +1136,7 @@ class TestStatsModels(unittest.TestCase):
                             if p == 1:
                                 y = y.flatten()
                             est = LinearDML(model_y=LinearRegression(),
-                                            model_t=LinearRegression(),
-                                            linear_first_stages=False)
+                                            model_t=LinearRegression())
                             est.fit(y, T, X=X[:, :d_x], W=X[:, d_x:],
                                     inference=StatsModelsInference(cov_type='nonrobust'))
                             intercept = est.intercept_.reshape((p, q))
@@ -1167,7 +1164,6 @@ class TestStatsModels(unittest.TestCase):
 
                             est = LinearDML(model_y=LinearRegression(),
                                             model_t=LinearRegression(),
-                                            linear_first_stages=False,
                                             featurizer=PolynomialFeatures(degree=1),
                                             fit_cate_intercept=False)
                             est.fit(y, T, X=X[:, :d_x], W=X[:, d_x:],
@@ -1217,7 +1213,6 @@ class TestStatsModels(unittest.TestCase):
                                 model_y=LinearRegression(),
                                 model_t=LinearRegression(),
                                 cv=SplitterSum(),
-                                linear_first_stages=False,
                                 discrete_treatment=False).fit(y_sum,
                                                               X_final[:, d:],
                                                               X=X_final[:, :d_x],

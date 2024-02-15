@@ -45,27 +45,57 @@ class _DynamicModelNuisanceSelector(ModelSelector):
         self._model_t = model_t
         self.n_periods = n_periods
 
-    def train(self, is_selecting, Y, T, X=None, W=None, sample_weight=None, groups=None):
+    def train(self, is_selecting, folds, Y, T, X=None, W=None, sample_weight=None, groups=None):
         """Fit a series of nuisance models for each period or period pairs."""
         assert Y.shape[0] % self.n_periods == 0, \
             "Length of training data should be an integer multiple of time periods."
         period_filters = _get_groups_period_filter(groups, self.n_periods)
-        if is_selecting:  # create the per-period y and t models
+        if not hasattr(self, '_model_y_trained'):  # create the per-period y and t models
             self._model_y_trained = {t: clone(self._model_y, safe=False)
                                      for t in np.arange(self.n_periods)}
             self._model_t_trained = {j: {t: clone(self._model_t, safe=False)
                                          for t in np.arange(j + 1)}
                                      for j in np.arange(self.n_periods)}
+
+        # we have to filter the folds because they contain the indices in the original data not
+        # the indices in the period-filtered data
+
+        def _translate_inds(t, inds):
+            # translate the indices in a fold to the indices in the period-filtered data
+            # if groups was [3,3,4,4,5,5,6,6,1,1,2,2,0,0] (the group ids can be in any order, but the
+            # time periods for each group should be contguous), and we had [10,11,0,1] as the indices in a fold
+            # (so the fold is taking the entries corresponding to groups 2 and 3)
+            # then group_period_filter(0) is [0,2,4,6,8,10,12] and gpf(1) is [1,3,5,7,9,11,13]
+            # so for period 1, the fold should be [10,0] => [5,0] (the indices that return 10 and 0 in the t=0 data)
+            # and for period 2, the fold should be [11,1] => [5,0] again (the indices that return 11,1 in the t=1 data)
+
+            # filter to the indices for the time period
+            inds = inds[np.isin(inds, period_filters[t])]
+
+            # now find their index in the period-filtered data, which is always sorted
+            return np.searchsorted(period_filters[t], inds)
+
+        if folds is not None:
+            translated_folds = []
+            for (train, test) in folds:
+                translated_folds.append((_translate_inds(0, train), _translate_inds(0, test)))
+                # sanity check that the folds are the same no matter the time period
+                for t in range(1, self.n_periods):
+                    assert np.array_equal(_translate_inds(t, train), _translate_inds(0, train))
+                    assert np.array_equal(_translate_inds(t, test), _translate_inds(0, test))
+        else:
+            translated_folds = None
+
         for t in np.arange(self.n_periods):
             self._model_y_trained[t].train(
-                is_selecting,
+                is_selecting, translated_folds,
                 self._index_or_None(X, period_filters[t]),
                 self._index_or_None(
                     W, period_filters[t]),
                 Y[period_filters[self.n_periods - 1]])
             for j in np.arange(t, self.n_periods):
                 self._model_t_trained[j][t].train(
-                    is_selecting,
+                    is_selecting, translated_folds,
                     self._index_or_None(X, period_filters[t]),
                     self._index_or_None(W, period_filters[t]),
                     T[period_filters[j]])
@@ -140,6 +170,10 @@ class _DynamicModelNuisanceSelector(ModelSelector):
 
     def _index_or_None(self, X, filter_idx):
         return None if X is None else X[filter_idx]
+
+    @property
+    def needs_fit(self):
+        return self._model_t.needs_fit or self._model_y.needs_fit
 
 
 class _DynamicModelFinal:
@@ -344,35 +378,23 @@ class DynamicDML(LinearModelFinalCateEstimatorMixin, _OrthoLearner):
 
     Parameters
     ----------
-    model_y: estimator, {'linear', 'forest'}, list of str/estimator, or 'auto'
-        model to estimate :math:`\\E[Y | X, W]`.
+    model_y: estimator, default ``'auto'``
+        Determines how to fit the outcome to the features.
 
-        - If an estimator, will use the model as is for fitting.
-        - If str, will use model associated with the keyword.
+        - If ``'auto'``, the model will be the best-fitting of a set of linear and forest models
 
-            - 'linear' - LogisticRegressionCV if discrete_outcome=True else WeightedLassoCVWrapper
-            - 'forest' - RandomForestClassifier if discrete_outcome=True else RandomForestRegressor
-        - If list, will perform model selection on the supplied list, which can be a mix of str and estimators, \
-            and then use the best estimator for fitting.
-        - If 'auto', model will select over linear and forest models
+        - Otherwise, see :ref:`model_selection` for the range of supported options;
+          if a single model is specified it should be a classifier if `discrete_outcome` is True
+          and a regressor otherwise
 
-        User-supplied estimators should support 'fit' and 'predict' methods,
-        and additionally 'predict_proba' if discrete_outcome=True.
-
-    model_t: estimator, {'linear', 'forest'}, list of str/estimator, or 'auto'
+    model_t: estimator, default ``'auto'``
         Determines how to fit the treatment to the features.
 
-        - If an estimator, will use the model as is for fitting.
-        - If str, will use model associated with the keyword.
+        - If ``'auto'``, the model will be the best-fitting of a set of linear and forest models
 
-            - 'linear' - LogisticRegressionCV if discrete_treatment=True else WeightedLassoCVWrapper
-            - 'forest' - RandomForestClassifier if discrete_treatment=True else RandomForestRegressor
-        - If list, will perform model selection on the supplied list, which can be a mix of str and estimators, \
-            and then use the best estimator for fitting.
-        - If 'auto', model will select over linear and forest models
-
-        User-supplied estimators should support 'fit' and 'predict' methods,
-        and additionally 'predict_proba' if discrete_treatment=True.
+        - Otherwise, see :ref:`model_selection` for the range of supported options;
+          if a single model is specified it should be a classifier if `discrete_treatment` is True
+          and a regressor otherwise
 
     featurizer : :term:`transformer`, optional
         Must support fit_transform and transform. Used to create composite features in the final CATE regression.
@@ -381,10 +403,6 @@ class DynamicDML(LinearModelFinalCateEstimatorMixin, _OrthoLearner):
 
     fit_cate_intercept : bool, default True
         Whether the linear CATE model should have a constant term.
-
-    linear_first_stages: bool
-        Whether the first stage models are linear (in which case we will expand the features passed to
-        `model_y` accordingly)
 
     discrete_outcome: bool, default False
         Whether the outcome should be treated as binary
@@ -455,31 +473,31 @@ class DynamicDML(LinearModelFinalCateEstimatorMixin, _OrthoLearner):
         est.fit(y, T, X=X, W=None, groups=groups, inference="auto")
 
     >>> est.const_marginal_effect(X[:2])
-    array([[-0.345..., -0.056..., -0.044...,  0.046..., -0.202...,
+    array([[-0.363..., -0.049..., -0.044...,  0.042..., -0.202...,
              0.023...],
-           [-0.120...,  0.434...,  0.052..., -0.201..., -0.115...,
-            -0.134...]])
+           [-0.128...,  0.424...,  0.050... , -0.203..., -0.115...,
+            -0.135...]])
     >>> est.effect(X[:2], T0=0, T1=1)
-    array([-0.579..., -0.085...])
+    array([-0.594..., -0.107...])
     >>> est.effect(X[:2], T0=np.zeros((2, n_periods*T.shape[1])), T1=np.ones((2, n_periods*T.shape[1])))
-    array([-0.579..., -0.085...])
+    array([-0.594..., -0.107...])
     >>> est.coef_
-    array([[ 0.108...],
-           [ 0.235...],
-           [ 0.046...],
-           [-0.119...],
-           [ 0.042...],
-           [-0.075...]])
+    array([[ 0.112... ],
+           [ 0.227...],
+           [ 0.045...],
+           [-0.118...],
+           [ 0.041...],
+           [-0.076...]])
     >>> est.coef__interval()
-    (array([[-0.042...],
-           [-0.001...],
+    (array([[-0.060...],
+           [-0.008...],
            [-0.120...],
-           [-0.393...],
+           [-0.392...],
            [-0.120...],
-           [-0.256...]]), array([[0.258...],
-           [0.473...],
-           [0.212...],
-           [0.154...],
+           [-0.257...]]), array([[0.286...],
+           [0.463...],
+           [0.212... ],
+           [0.156...],
            [0.204...],
            [0.104...]]))
     """
@@ -488,7 +506,7 @@ class DynamicDML(LinearModelFinalCateEstimatorMixin, _OrthoLearner):
                  model_y='auto', model_t='auto',
                  featurizer=None,
                  fit_cate_intercept=True,
-                 linear_first_stages=False,
+                 linear_first_stages="deprecated",
                  discrete_outcome=False,
                  discrete_treatment=False,
                  categories='auto',
@@ -498,7 +516,9 @@ class DynamicDML(LinearModelFinalCateEstimatorMixin, _OrthoLearner):
                  random_state=None,
                  allow_missing=False):
         self.fit_cate_intercept = fit_cate_intercept
-        self.linear_first_stages = linear_first_stages
+        if linear_first_stages != "deprecated":
+            warn("The linear_first_stages parameter is deprecated and will be removed in a future version of EconML",
+                 DeprecationWarning)
         self.featurizer = clone(featurizer, safe=False)
         self.model_y = clone(model_y, safe=False)
         self.model_t = clone(model_t, safe=False)

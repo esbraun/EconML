@@ -82,7 +82,7 @@ class _FirstStageSelector(SingleModelSelector):
         self._model = clone(model, safe=False)
         self._discrete_target = discrete_target
 
-    def train(self, is_selecting, X, W, Target, sample_weight=None, groups=None):
+    def train(self, is_selecting, folds, X, W, Target, sample_weight=None, groups=None):
         if self._discrete_target:
             # In this case, the Target is the one-hot-encoding of the treatment variable
             # We need to go back to the label representation of the one-hot so as to call
@@ -92,7 +92,7 @@ class _FirstStageSelector(SingleModelSelector):
                                      "don't contain all treatments")
             Target = inverse_onehot(Target)
 
-        self._model.train(is_selecting, _combine(X, W, Target.shape[0]), Target,
+        self._model.train(is_selecting, folds, _combine(X, W, Target.shape[0]), Target,
                           **filter_none_kwargs(groups=groups, sample_weight=sample_weight))
         return self
 
@@ -103,6 +103,10 @@ class _FirstStageSelector(SingleModelSelector):
     @property
     def best_score(self):
         return self._model.best_score
+
+    @property
+    def needs_fit(self):
+        return self._model.needs_fit
 
 
 def _make_first_stage_selector(model, is_discrete, random_state):
@@ -354,35 +358,23 @@ class DML(LinearModelFinalCateEstimatorMixin, _BaseDML):
 
     Parameters
     ----------
-    model_y: estimator, {'linear', 'forest'}, list of str/estimator, or 'auto'
+    model_y: estimator, default ``'auto'``
+        Determines how to fit the outcome to the features.
+
+        - If ``'auto'``, the model will be the best-fitting of a set of linear and forest models
+
+        - Otherwise, see :ref:`model_selection` for the range of supported options;
+          if a single model is specified it should be a classifier if `discrete_outcome` is True
+          and a regressor otherwise
+
+    model_t: estimator, default ``'auto'``
         Determines how to fit the treatment to the features.
 
-        - If an estimator, will use the model as is for fitting.
-        - If str, will use model associated with the keyword.
+        - If ``'auto'``, the model will be the best-fitting of a set of linear and forest models
 
-            - 'linear' - LogisticRegressionCV if discrete_outcome=True else WeightedLassoCVWrapper
-            - 'forest' - RandomForestClassifier if discrete_outcome=True else RandomForestRegressor
-        - If list, will perform model selection on the supplied list, which can be a mix of str and estimators, \
-            and then use the best estimator for fitting.
-        - If 'auto', model will select over linear and forest models
-
-        User-supplied estimators should support 'fit' and 'predict' methods,
-        and additionally 'predict_proba' if discrete_outcome=True.
-
-    model_t: estimator, {'linear', 'forest'}, list of str/estimator, or 'auto
-        Determines how to fit the treatment to the features.
-
-        - If an estimator, will use the model as is for fitting.
-        - If str, will use model associated with the keyword.
-
-            - 'linear' - LogisticRegressionCV if discrete_treatment=True else WeightedLassoCVWrapper
-            - 'forest' - RandomForestClassifier if discrete_treatment=True else RandomForestRegressor
-        - If list, will perform model selection on the supplied list, which can be a mix of str and estimators, \
-            and then use the best estimator for fitting.
-        - If 'auto', model will select over linear and forest models
-
-        User-supplied estimators should support 'fit' and 'predict' methods,
-        and additionally 'predict_proba' if discrete_treatment=True.
+        - Otherwise, see :ref:`model_selection` for the range of supported options;
+          if a single model is specified it should be a classifier if `discrete_treatment` is True
+          and a regressor otherwise
 
     model_final: estimator
         The estimator for fitting the response residuals to the treatment residuals. Must implement
@@ -400,10 +392,6 @@ class DML(LinearModelFinalCateEstimatorMixin, _BaseDML):
 
     fit_cate_intercept : bool, default True
         Whether the linear CATE model should have a constant term.
-
-    linear_first_stages: bool
-        Whether the first stage models are linear (in which case we will expand the features passed to
-        `model_y` accordingly)
 
     discrete_outcome: bool, default ``False``
         Whether the outcome should be treated as binary
@@ -485,25 +473,24 @@ class DML(LinearModelFinalCateEstimatorMixin, _BaseDML):
             model_y=RandomForestRegressor(),
             model_t=RandomForestClassifier(),
             model_final=StatsModelsLinearRegression(fit_intercept=False),
-            linear_first_stages=False,
             discrete_treatment=True
         )
         est.fit(y, T, X=X, W=None)
 
     >>> est.effect(X[:3])
-    array([0.65142..., 1.82917..., 0.79287...])
+    array([0.63382..., 1.78225..., 0.71859...])
     >>> est.effect_interval(X[:3])
-    (array([0.28936..., 1.31239..., 0.47626...]),
-    array([1.01348..., 2.34594..., 1.10949...]))
+    (array([0.27937..., 1.27619..., 0.42091...]),
+    array([0.98827... , 2.28831..., 1.01628...]))
     >>> est.coef_
-    array([ 0.32570..., -0.05311..., -0.03973...,  0.01598..., -0.11045...])
+    array([ 0.42857...,  0.04488..., -0.03317...,  0.02258..., -0.14875...])
     >>> est.coef__interval()
-    (array([ 0.13791..., -0.20081..., -0.17941..., -0.12073..., -0.25769...]),
-    array([0.51348..., 0.09458..., 0.09993..., 0.15269..., 0.03679...]))
+    (array([ 0.25179..., -0.10558..., -0.16723... , -0.11916..., -0.28759...]),
+    array([ 0.60535...,  0.19536...,  0.10088...,  0.16434..., -0.00990...]))
     >>> est.intercept_
-    1.02940...
+    1.01166...
     >>> est.intercept__interval()
-    (0.88754..., 1.17125...)
+    (0.87125..., 1.15207...)
     """
 
     def __init__(self, *,
@@ -529,7 +516,6 @@ class DML(LinearModelFinalCateEstimatorMixin, _BaseDML):
         if linear_first_stages != "deprecated":
             warn("The linear_first_stages parameter is deprecated and will be removed in a future version of EconML",
                  DeprecationWarning)
-        self.linear_first_stages = linear_first_stages
         self.featurizer = clone(featurizer, safe=False)
         self.model_y = clone(model_y, safe=False)
         self.model_t = clone(model_t, safe=False)
@@ -628,35 +614,23 @@ class LinearDML(StatsModelsCateEstimatorMixin, DML):
 
     Parameters
     ----------
-    model_y: estimator, {'linear', 'forest'}, list of str/estimator, or 'auto'
+    model_y: estimator, default ``'auto'``
+        Determines how to fit the outcome to the features.
+
+        - If ``'auto'``, the model will be the best-fitting of a set of linear and forest models
+
+        - Otherwise, see :ref:`model_selection` for the range of supported options;
+          if a single model is specified it should be a classifier if `discrete_outcome` is True
+          and a regressor otherwise
+
+    model_t: estimator, default ``'auto'``
         Determines how to fit the treatment to the features.
 
-        - If an estimator, will use the model as is for fitting.
-        - If str, will use model associated with the keyword.
+        - If ``'auto'``, the model will be the best-fitting of a set of linear and forest models
 
-            - 'linear' - LogisticRegressionCV if discrete_outcome=True else WeightedLassoCVWrapper
-            - 'forest' - RandomForestClassifier if discrete_outcome=True else RandomForestRegressor
-        - If list, will perform model selection on the supplied list, which can be a mix of str and estimators, \
-            and then use the best estimator for fitting.
-        - If 'auto', model will select over linear and forest models
-
-        User-supplied estimators should support 'fit' and 'predict' methods,
-        and additionally 'predict_proba' if discrete_outcome=True.
-
-    model_t: estimator, {'linear', 'forest'}, list of str/estimator, or 'auto', default 'auto'
-        Determines how to fit the treatment to the features.
-
-        - If an estimator, will use the model as is for fitting.
-        - If str, will use model associated with the keyword.
-
-            - 'linear' - LogisticRegressionCV if discrete_treatment=True else WeightedLassoCVWrapper
-            - 'forest' - RandomForestClassifier if discrete_treatment=True else RandomForestRegressor
-        - If list, will perform model selection on the supplied list, which can be a mix of str and estimators, \
-            and then use the best estimator for fitting.
-        - If 'auto', model will select over linear and forest models
-
-        User-supplied estimators should support 'fit' and 'predict' methods,
-        and additionally 'predict_proba' if discrete_treatment=True.
+        - Otherwise, see :ref:`model_selection` for the range of supported options;
+          if a single model is specified it should be a classifier if `discrete_treatment` is True
+          and a regressor otherwise
 
     featurizer : :term:`transformer`, optional
         Must support fit_transform and transform. Used to create composite features in the final CATE regression.
@@ -670,10 +644,6 @@ class LinearDML(StatsModelsCateEstimatorMixin, DML):
 
     fit_cate_intercept : bool, default True
         Whether the linear CATE model should have a constant term.
-
-    linear_first_stages: bool
-        Whether the first stage models are linear (in which case we will expand the features passed to
-        `model_y` accordingly)
 
     discrete_outcome: bool, default ``False``
         Whether the outcome should be treated as binary
@@ -719,6 +689,10 @@ class LinearDML(StatsModelsCateEstimatorMixin, DML):
         Whether to allow missing values in W. If True, will need to supply model_y, model_t that can handle
         missing values.
 
+    enable_federation: bool, default False
+        Whether to enable federation for the final model.  This has a memory cost so should be enabled only
+        if this model will be aggregated with other models.
+
     use_ray: bool, default False
         Whether to use Ray to parallelize the cross-fitting step. If True, Ray must be installed.
 
@@ -749,19 +723,19 @@ class LinearDML(StatsModelsCateEstimatorMixin, DML):
         est.fit(y, T, X=X, W=None)
 
     >>> est.effect(X[:3])
-    array([0.60257..., 1.74564..., 0.72062...])
+    array([0.49977..., 1.91668..., 0.70799...])
     >>> est.effect_interval(X[:3])
-    (array([0.25760..., 1.24005..., 0.41770...]),
-    array([0.94754..., 2.25123..., 1.02354...]))
+    (array([0.15122..., 1.40176..., 0.40954...]),
+    array([0.84831..., 2.43159..., 1.00644...]))
     >>> est.coef_
-    array([ 0.41635...,  0.00287..., -0.01831..., -0.01197..., -0.11620...])
+    array([ 0.48825...,  0.00105...,  0.00244...,  0.02217..., -0.08471...])
     >>> est.coef__interval()
-    (array([ 0.24496..., -0.13418..., -0.14852..., -0.13947..., -0.25089...]),
-    array([0.58775..., 0.13993..., 0.11189..., 0.11551..., 0.01848...]))
+    (array([ 0.30469..., -0.13904..., -0.12790..., -0.11514..., -0.22505... ]),
+    array([0.67180..., 0.14116..., 0.13278..., 0.15949..., 0.05562...]))
     >>> est.intercept_
-    0.97162...
+    1.01247...
     >>> est.intercept__interval()
-    (0.83640..., 1.10684...)
+    (0.87480..., 1.15015...)
     """
 
     def __init__(self, *,
@@ -778,6 +752,7 @@ class LinearDML(StatsModelsCateEstimatorMixin, DML):
                  mc_agg='mean',
                  random_state=None,
                  allow_missing=False,
+                 enable_federation=False,
                  use_ray=False,
                  ray_remote_func_options=None
                  ):
@@ -799,12 +774,13 @@ class LinearDML(StatsModelsCateEstimatorMixin, DML):
                          allow_missing=allow_missing,
                          use_ray=use_ray,
                          ray_remote_func_options=ray_remote_func_options)
+        self.enable_federation = enable_federation
 
     def _gen_allowed_missing_vars(self):
         return ['W'] if self.allow_missing else []
 
     def _gen_model_final(self):
-        return StatsModelsLinearRegression(fit_intercept=False)
+        return StatsModelsLinearRegression(fit_intercept=False, enable_federation=self.enable_federation)
 
     # override only so that we can update the docstring to indicate support for `StatsModelsInference`
     def fit(self, Y, T, *, X=None, W=None, sample_weight=None, freq_weight=None, sample_var=None, groups=None,
@@ -873,35 +849,23 @@ class SparseLinearDML(DebiasedLassoCateEstimatorMixin, DML):
 
     Parameters
     ----------
-    model_y: estimator, {'linear', 'forest'}, list of str/estimator, or 'auto'
+    model_y: estimator, default ``'auto'``
+        Determines how to fit the outcome to the features.
+
+        - If ``'auto'``, the model will be the best-fitting of a set of linear and forest models
+
+        - Otherwise, see :ref:`model_selection` for the range of supported options;
+          if a single model is specified it should be a classifier if `discrete_outcome` is True
+          and a regressor otherwise
+
+    model_t: estimator, default ``'auto'``
         Determines how to fit the treatment to the features.
 
-        - If an estimator, will use the model as is for fitting.
-        - If str, will use model associated with the keyword.
+        - If ``'auto'``, the model will be the best-fitting of a set of linear and forest models
 
-            - 'linear' - LogisticRegressionCV if discrete_outcome=True else WeightedLassoCVWrapper
-            - 'forest' - RandomForestClassifier if discrete_outcome=True else RandomForestRegressor
-        - If list, will perform model selection on the supplied list, which can be a mix of str and estimators, \
-            and then use the best estimator for fitting.
-        - If 'auto', model will select over linear and forest models
-
-        User-supplied estimators should support 'fit' and 'predict' methods,
-        and additionally 'predict_proba' if discrete_outcome=True.
-
-    model_t: estimator, {'linear', 'forest'}, list of str/estimator, or 'auto', default 'auto'
-        Determines how to fit the treatment to the features.
-
-        - If an estimator, will use the model as is for fitting.
-        - If str, will use model associated with the keyword.
-
-            - 'linear' - LogisticRegressionCV if discrete_treatment=True else WeightedLassoCVWrapper
-            - 'forest' - RandomForestClassifier if discrete_treatment=True else RandomForestRegressor
-        - If list, will perform model selection on the supplied list, which can be a mix of str and estimators, \
-            and then use the best estimator for fitting.
-        - If 'auto', model will select over linear and forest models
-
-        User-supplied estimators should support 'fit' and 'predict' methods,
-        and additionally 'predict_proba' if discrete_treatment=True.
+        - Otherwise, see :ref:`model_selection` for the range of supported options;
+          if a single model is specified it should be a classifier if `discrete_treatment` is True
+          and a regressor otherwise
 
     alpha: str or float, default 'auto'
         CATE L1 regularization applied through the debiased lasso in the final model.
@@ -945,10 +909,6 @@ class SparseLinearDML(DebiasedLassoCateEstimatorMixin, DML):
 
     fit_cate_intercept : bool, default True
         Whether the linear CATE model should have a constant term.
-
-    linear_first_stages: bool
-        Whether the first stage models are linear (in which case we will expand the features passed to
-        `model_y` accordingly)
 
     discrete_outcome: bool, default ``False``
         Whether the outcome should be treated as binary
@@ -1024,19 +984,19 @@ class SparseLinearDML(DebiasedLassoCateEstimatorMixin, DML):
         est.fit(y, T, X=X, W=None)
 
     >>> est.effect(X[:3])
-    array([0.59812..., 1.75138..., 0.71770...])
+    array([0.50083..., 1.91663..., 0.70386...])
     >>> est.effect_interval(X[:3])
-    (array([0.25046..., 1.24249..., 0.42606...]),
-    array([0.94577..., 2.26028..., 1.00935... ]))
+    (array([0.14616..., 1.40364..., 0.40674...]),
+    array([0.85550...  , 2.42962... , 1.00099...]))
     >>> est.coef_
-    array([ 0.41820...,  0.00506..., -0.01831..., -0.00778..., -0.11965...])
+    array([ 0.49123...,  0.00495...,  0.00007...,  0.02302..., -0.08483...])
     >>> est.coef__interval()
-    (array([ 0.25058..., -0.13713..., -0.15469..., -0.13932..., -0.26252...]),
-    array([0.58583..., 0.14726..., 0.11806..., 0.12376..., 0.02320...]))
+    (array([ 0.31323..., -0.13848..., -0.13721..., -0.11141..., -0.22961...]),
+    array([0.66923..., 0.14839... , 0.13735..., 0.15745..., 0.05993...]))
     >>> est.intercept_
-    0.97131...
+    1.01476...
     >>> est.intercept__interval()
-    (0.83363..., 1.10899...)
+    (0.87620..., 1.15332...)
     """
 
     def __init__(self, *,
@@ -1051,7 +1011,7 @@ class SparseLinearDML(DebiasedLassoCateEstimatorMixin, DML):
                  featurizer=None,
                  treatment_featurizer=None,
                  fit_cate_intercept=True,
-                 linear_first_stages=True,
+                 linear_first_stages="deprecated",
                  discrete_outcome=False,
                  discrete_treatment=False,
                  categories='auto',
@@ -1176,32 +1136,23 @@ class KernelDML(DML):
 
     Parameters
     ----------
-    model_y: estimator, {'linear', 'forest'}, list of str/estimator, or 'auto'
+    model_y: estimator, default ``'auto'``
+        Determines how to fit the outcome to the features.
+
+        - If ``'auto'``, the model will be the best-fitting of a set of linear and forest models
+
+        - Otherwise, see :ref:`model_selection` for the range of supported options;
+          if a single model is specified it should be a classifier if `discrete_outcome` is True
+          and a regressor otherwise
+
+    model_t: estimator, default ``'auto'``
         Determines how to fit the treatment to the features.
 
-        - If an estimator, will use the model as is for fitting.
-        - If str, will use model associated with the keyword.
+        - If ``'auto'``, the model will be the best-fitting of a set of linear and forest models
 
-            - 'linear' - LogisticRegressionCV if discrete_outcome=True else WeightedLassoCVWrapper
-            - 'forest' - RandomForestClassifier if discrete_outcome=True else RandomForestRegressor
-        - If list, will perform model selection on the supplied list, which can be a mix of str and estimators, \
-            and then use the best estimator for fitting.
-        - If 'auto', model will select over linear and forest models
-
-        User-supplied estimators should support 'fit' and 'predict' methods,
-        and additionally 'predict_proba' if discrete_outcome=True.
-
-    model_t: estimator, {'linear', 'forest'}, list of str/estimator, or 'auto', default 'auto'
-        Determines how to fit the treatment to the features.
-
-        - If an estimator, will use the model as is for fitting.
-
-        - If list, will perform model selection on the supplied list, which can be a mix of str and estimators, \
-            and then use the best estimator for fitting.
-        - If 'auto', model will select over linear and forest models
-
-        User-supplied estimators should support 'fit' and 'predict' methods,
-        and additionally 'predict_proba' if discrete_treatment=True.
+        - Otherwise, see :ref:`model_selection` for the range of supported options;
+          if a single model is specified it should be a classifier if `discrete_treatment` is True
+          and a regressor otherwise
 
     fit_cate_intercept : bool, default True
         Whether the linear CATE model should have a constant term.
@@ -1291,7 +1242,7 @@ class KernelDML(DML):
         est.fit(y, T, X=X, W=None)
 
     >>> est.effect(X[:3])
-    array([0.64124..., 1.46561..., 0.68568...])
+    array([0.63041..., 1.86098..., 0.74218...])
     """
 
     def __init__(self, model_y='auto', model_t='auto',
@@ -1401,32 +1352,23 @@ class NonParamDML(_BaseDML):
 
     Parameters
     ----------
-    model_y: estimator, {'linear', 'forest'}, list of str/estimator, or 'auto'
+    model_y: estimator, default ``'auto'``
+        Determines how to fit the outcome to the features.
+
+        - If ``'auto'``, the model will be the best-fitting of a set of linear and forest models
+
+        - Otherwise, see :ref:`model_selection` for the range of supported options;
+          if a single model is specified it should be a classifier if `discrete_outcome` is True
+          and a regressor otherwise
+
+    model_t: estimator, default ``'auto'``
         Determines how to fit the treatment to the features.
 
-        - If an estimator, will use the model as is for fitting.
-        - If str, will use model associated with the keyword.
+        - If ``'auto'``, the model will be the best-fitting of a set of linear and forest models
 
-            - 'linear' - LogisticRegressionCV if discrete_outcome=True else WeightedLassoCVWrapper
-            - 'forest' - RandomForestClassifier if discrete_outcome=True else RandomForestRegressor
-        - If list, will perform model selection on the supplied list, which can be a mix of str and estimators, \
-            and then use the best estimator for fitting.
-        - If 'auto', model will select over linear and forest models
-
-        User-supplied estimators should support 'fit' and 'predict' methods,
-        and additionally 'predict_proba' if discrete_outcome=True.
-
-    model_t: estimator, {'linear', 'forest'}, list of str/estimator, or 'auto'
-        Determines how to fit the treatment to the features.
-
-        - If an estimator, will use the model as is for fitting.
-
-        - If list, will perform model selection on the supplied list, which can be a mix of str and estimators, \
-            and then use the best estimator for fitting.
-        - If 'auto', model will select over linear and forest models
-
-        User-supplied estimators should support 'fit' and 'predict' methods,
-        and additionally 'predict_proba' if discrete_treatment=True.
+        - Otherwise, see :ref:`model_selection` for the range of supported options;
+          if a single model is specified it should be a classifier if `discrete_treatment` is True
+          and a regressor otherwise
 
     model_final: estimator
         The estimator for fitting the response residuals to the treatment residuals. Must implement
@@ -1523,7 +1465,7 @@ class NonParamDML(_BaseDML):
         est.fit(y, T, X=X, W=None)
 
     >>> est.effect(X[:3])
-    array([0.32389..., 0.85703..., 0.97468...])
+    array([0.35318..., 1.28760..., 0.83506...])
     """
 
     def __init__(self, *,
