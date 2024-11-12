@@ -8,27 +8,18 @@ import pandas as pd
 import scipy.sparse
 import sklearn
 import sparse as sp
-import itertools
 import inspect
-import types
-from operator import getitem
 from collections import defaultdict, Counter
 from sklearn import clone
-from sklearn.base import TransformerMixin, BaseEstimator
-from sklearn.linear_model import LassoCV, MultiTaskLassoCV, Lasso, MultiTaskLasso
+from sklearn.base import TransformerMixin
 from functools import reduce, wraps
 from sklearn.utils import check_array, check_X_y
 from sklearn.utils.validation import assert_all_finite
 from sklearn.preprocessing import OneHotEncoder, PolynomialFeatures, LabelEncoder
 import warnings
 from warnings import warn
-from collections.abc import Iterable
-from sklearn.utils.multiclass import type_of_target
-import numbers
 from statsmodels.iolib.table import SimpleTable
 from statsmodels.iolib.summary import summary_return
-from statsmodels.compat.python import lmap
-import copy
 from inspect import signature
 
 MAX_RAND_SEED = np.iinfo(np.int32).max
@@ -72,7 +63,7 @@ def check_high_dimensional(X, T, *, threshold, featurizer=None, discrete_treatme
     elif featurizer is None:
         d_x = X.shape[1]
     else:
-        d_x = clone(featurizer, safe=False).fit_transform(X[[0], :]).shape[1]
+        d_x = clone(featurizer, safe=False).fit_transform(X).shape[1]
     if discrete_treatment:
         d_t = len(set(T.flatten())) - 1
     else:
@@ -419,7 +410,7 @@ def transpose(X, axes=None):
 
 def add_intercept(X):
     """
-    Adds an intercept feature to an array by prepending a column of ones.
+    Add an intercept feature to an array by prepending a column of ones.
 
     Parameters
     ----------
@@ -605,7 +596,8 @@ def check_input_arrays(*args, validate_len=True, force_all_finite=True, dtype=No
 
 
 def get_input_columns(X, prefix="X"):
-    """Extracts column names from dataframe-like input object.
+    """
+    Extract column names from dataframe-like input object.
 
     Currently supports column name extraction from pandas DataFrame and Series objects.
 
@@ -662,11 +654,10 @@ def get_feature_names_or_default(featurizer, feature_names, prefix="feat(X)"):
         output prefix in the event where we assign default feature names
 
     Returns
-    ----------
+    -------
     feature_names_out : list of str
         The feature names
     """
-
     # coerce feature names to be strings
     if not all(isinstance(item, str) for item in feature_names):
         warnings.warn("Not all feature names are strings. Coercing to strings for now.", UserWarning)
@@ -714,7 +705,7 @@ def check_models(models, n):
         Number of models needed
 
     Returns
-    ----------
+    -------
     models : list or tuple of estimator
 
     """
@@ -782,6 +773,28 @@ def reshape_treatmentwise_effects(A, d_t, d_y):
     else:
         return A
 
+def reshape_outcomewise_effects(A, d_y):
+    """
+    Given an effects matrix, reshape second dimension to be consistent with d_y[0].
+
+    Parameters
+    ----------
+    A : array
+        The effects array to be reshaped. It should have shape (m,) or (m, d_y).
+    d_y : tuple of int
+        Either () if Y was a vector, or a 1-tuple of the number of columns of Y if it was an array.
+
+    Returns
+    -------
+    A : array
+        The reshaped effects array with shape:
+         - (m, ) if d_y is () and Y is a vector,
+         - (m, d_y) if d_y is a 1-tuple and Y is an array.
+    """
+    if np.shape(A)[1:] == d_y or d_y == ():
+        return A
+    else:
+        return A.reshape(-1, d_y[0])
 
 def einsum_sparse(subscripts, *arrs):
     """
@@ -911,9 +924,9 @@ def einsum_sparse(subscripts, *arrs):
 
     results = defaultdict(int)
 
-    for (s, l) in xs:
+    for (s, lst) in xs:
         coordMap = [s.index(c) for c in outputs]
-        for (c, d) in l:
+        for (c, d) in lst:
             results[tuple(c[i] for i in coordMap)] += d
 
     return sp.COO(np.array(list(results.keys())).T if results else
@@ -924,7 +937,7 @@ def einsum_sparse(subscripts, *arrs):
 
 def filter_none_kwargs(**kwargs):
     """
-    Filters out any keyword arguments that are None.
+    Filter out any keyword arguments that are None.
 
     This is useful when specific optional keyword arguments might not be universally supported,
     so that stripping them out when they are not set enables more uses to succeed.
@@ -1091,7 +1104,7 @@ def _safe_norm_ppf(q, loc=0, scale=1):
 class Summary:
     # This class is mainly derived from statsmodels.iolib.summary.Summary
     """
-    Result summary
+    Result summary.
 
     Construction does not take any parameters. Tables and text can be added
     with the `add_` methods.
@@ -1117,7 +1130,7 @@ class Summary:
         return str(type(self)) + '\n"""\n' + self.__str__() + '\n"""'
 
     def _repr_html_(self):
-        '''Display as HTML in IPython notebook.'''
+        """Display as HTML in IPython notebook."""
         return self.as_html()
 
     def add_table(self, res, header, index, title):
@@ -1125,32 +1138,32 @@ class Summary:
         self.tables.append(table)
 
     def add_extra_txt(self, etext):
-        '''add additional text that will be added at the end in text format
+        """Add additional text that will be added at the end in text format.
 
         Parameters
         ----------
         etext : list[str]
             string with lines that are added to the text output.
 
-        '''
+        """
         self.extra_txt = '\n'.join(etext)
 
     def as_text(self):
-        '''return tables as string
+        """Return tables as string.
 
         Returns
         -------
         txt : str
             summary tables and extra text as one string
 
-        '''
+        """
         txt = summary_return(self.tables, return_fmt='text')
         if self.extra_txt is not None:
             txt = txt + '\n\n' + self.extra_txt
         return txt
 
     def as_latex(self):
-        '''return tables as string
+        """Return tables as string.
 
         Returns
         -------
@@ -1163,35 +1176,35 @@ class Summary:
         It is recommended to use `as_latex_tabular` directly on the individual
         tables.
 
-        '''
+        """
         latex = summary_return(self.tables, return_fmt='latex')
         if self.extra_txt is not None:
             latex = latex + '\n\n' + self.extra_txt.replace('\n', ' \\newline\n ')
         return latex
 
     def as_csv(self):
-        '''return tables as string
+        """Return tables as string.
 
         Returns
         -------
         csv : str
             concatenated summary tables in comma delimited format
 
-        '''
+        """
         csv = summary_return(self.tables, return_fmt='csv')
         if self.extra_txt is not None:
             csv = csv + '\n\n' + self.extra_txt
         return csv
 
     def as_html(self):
-        '''return tables as string
+        """Return tables as string.
 
         Returns
         -------
         html : str
             concatenated summary tables in HTML format
 
-        '''
+        """
         html = summary_return(self.tables, return_fmt='html')
         if self.extra_txt is not None:
             html = html + '<br/><br/>' + self.extra_txt.replace('\n', '<br/>')
@@ -1200,10 +1213,9 @@ class Summary:
 
 class SeparateModel:
     """
-    Splits the data based on the last feature and trains
-    a separate model for each subsample. At predict time, it
-    uses the last feature to choose which model to use
-    to predict.
+    Splits the data based on the last feature and trains a separate model for each subsample.
+
+    At predict time, it uses the last feature to choose which model to use to predict.
     """
 
     def __init__(self, *models):
@@ -1230,7 +1242,7 @@ class SeparateModel:
 
 def deprecated(message, category=FutureWarning):
     """
-    Enables decorating a method or class to providing a warning when it is used.
+    Enable decorating a method or class to providing a warning when it is used.
 
     Parameters
     ----------
@@ -1265,7 +1277,7 @@ def deprecated(message, category=FutureWarning):
 
 def _deprecate_positional(message, bad_args, category=FutureWarning):
     """
-    Enables decorating a method to provide a warning when certain arguments are used positionally.
+    Enable decorating a method to provide a warning when certain arguments are used positionally.
 
     Parameters
     ----------
@@ -1321,8 +1333,7 @@ class MissingModule:
 
 def transpose_dictionary(d):
     """
-    Transpose a dictionary of dictionaries, bringing the keys from the second level
-    to the top and vice versa
+    Transpose a dictionary of dictionaries, bringing the keys from the second level to the top and vice versa.
 
     Parameters
     ----------
@@ -1347,7 +1358,8 @@ def transpose_dictionary(d):
 def reshape_arrays_2dim(length, *args):
     """
     Reshape the input arrays as two dimensional.
-    If None, will be reshaped as (n, 0).
+
+    If any entry is None, will be reshaped as (n, 0).
 
     Parameters
     ----------
@@ -1375,21 +1387,23 @@ def reshape_arrays_2dim(length, *args):
 class _RegressionWrapper:
     """
     A simple wrapper that makes a binary classifier behave like a regressor.
+
     Essentially .fit, calls the fit method of the classifier and
     .predict calls the .predict_proba method of the classifier
     and returns the probability of label 1.
+
+    Parameters
+    ----------
+    clf : the classifier model
     """
 
     def __init__(self, clf):
-        """
-        Parameters
-        ----------
-        clf : the classifier model
-        """
         self._clf = clf
 
     def fit(self, X, y, **kwargs):
         """
+        Fit the model.
+
         Parameters
         ----------
         X : features
@@ -1402,6 +1416,8 @@ class _RegressionWrapper:
 
     def predict(self, X):
         """
+        Predict the outcome.
+
         Parameters
         ----------
         X : features
@@ -1410,7 +1426,7 @@ class _RegressionWrapper:
 
 
 class _TransformerWrapper:
-    """Wrapper that takes a featurizer as input and adds jacobian calculation functionality"""
+    """Wrapper that takes a featurizer as input and adds jacobian calculation functionality."""
 
     def __init__(self, featurizer):
         self.featurizer = featurizer
@@ -1481,23 +1497,20 @@ class _TransformerWrapper:
 
 
 def jacify_featurizer(featurizer):
-    """
-       Function that takes a featurizer as input and returns a wrapper class that includes
-       a function for calculating the jacobian
-    """
+    """Convert a featurizer into a wrapper class that includes a function for calculating the jacobian."""
     return _TransformerWrapper(featurizer)
 
 
 def strata_from_discrete_arrays(arrs):
     """
-    Combine multiple discrete arrays into a single array for stratification purposes:
+    Combine multiple discrete arrays into a single array for stratification purposes.
 
-    e.g. if arrs are
-    [0 1 2 0 1 2 0 1 2 0 1 2],
+    For example, if arrs is
+    `[[0 1 2 0 1 2 0 1 2 0 1 2],
     [0 1 0 1 0 1 0 1 0 1 0 1],
-    [0 0 0 0 0 0 1 1 1 1 1 1]
+    [0 0 0 0 0 0 1 1 1 1 1 1]]`
     then output will be
-    [0 8 4 6 2 10 1 9 5 7 3 11]
+    `[0 8 4 6 2 10 1 9 5 7 3 11]`
 
     Every distinct combination of these discrete arrays will have it's own label.
     """
@@ -1516,7 +1529,9 @@ def strata_from_discrete_arrays(arrs):
 
 def one_hot_encoder(sparse=False, **kwargs):
     """
-    Wrapper for sklearn's OneHotEncoder that handles the name change from `sparse` to `sparse_output`
+    Create a :class:`~sklearn.preprocessing.OneHotEncoder`.
+
+    This handles the breaking name change from `sparse` to `sparse_output`
     between sklearn versions 1.1 and 1.2.
     """
     from packaging.version import parse
